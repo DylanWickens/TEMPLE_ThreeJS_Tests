@@ -7,6 +7,8 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { GammaCorrectionShader } from 'three/examples/jsm/shaders/GammaCorrectionShader.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { FilmPass } from "three/addons/postprocessing/FilmPass.js";
 import GUI from "lil-gui";
 import particleVertexShader from "./shaders/particles/vert.glsl";
 import particleFragShader from "./shaders/particles/frag.glsl";
@@ -42,6 +44,8 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setSize(sizes.width, sizes.height);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
 
 /*
  * Models
@@ -152,15 +156,19 @@ effectComposer.setSize(sizes.width, sizes.height);
 const renderPass = new RenderPass(scene, camera);
 effectComposer.addPass(renderPass);
 
-const unrealBloomPass = new UnrealBloomPass();
-unrealBloomPass.strength = 0.4
-unrealBloomPass.radius = 0.01
-unrealBloomPass.threshold = 0.2
+const unrealBloomPass = new UnrealBloomPass(
+  new THREE.Vector2(sizes.width, sizes.height),
+  0.5, // strength
+  0.8, // radius
+  0.2, // threshold
+);
 effectComposer.addPass(unrealBloomPass);
 
-// Gamma Correction – FINAL PASS 
-const gammaCorrectionPass = new ShaderPass(GammaCorrectionShader);
-effectComposer.addPass(gammaCorrectionPass);
+const filmPass = new FilmPass(0.5, false); // low intensity
+effectComposer.addPass(filmPass); // before OutputPass
+
+const outputPass = new OutputPass();
+effectComposer.addPass(outputPass);
 
 // Update viewport
 window.addEventListener("resize", () => {

@@ -4,10 +4,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-
-
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-
 import { GammaCorrectionShader } from 'three/examples/jsm/shaders/GammaCorrectionShader.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import GUI from "lil-gui";
@@ -126,28 +123,6 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
   particles = new THREE.Points(particles.geometry, particles.material);
   scene.add(particles);
 
-  // Add to debug controls// Add to debug controls
-  const folder = gui.addFolder("Noise");
-  folder
-    .add(particles.material.uniforms.uNoisePeriod, "value")
-    .min(0)
-    .max(5)
-    .step(0.01)
-    .name("Period");
-
-  folder
-    .add(particles.material.uniforms.uNoiseSpeed, "value")
-    .min(0)
-    .max(10)
-    .step(0.01)
-    .name("Speed");
-
-  folder
-    .add(particles.material.uniforms.uNoiseStrength, "value")
-    .min(0)
-    .max(10)
-    .step(0.001)
-    .name("Strength");
 });
 
 // Camera

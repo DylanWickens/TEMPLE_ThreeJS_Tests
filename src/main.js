@@ -2,6 +2,14 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+
+
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+
+import { GammaCorrectionShader } from 'three/examples/jsm/shaders/GammaCorrectionShader.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import GUI from "lil-gui";
 import particleVertexShader from "./shaders/particles/vert.glsl";
 import particleFragShader from "./shaders/particles/frag.glsl";
@@ -63,7 +71,7 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
     /* If you know the total point count ahead of time,
     you can pre-allocate totalPoints for opimisation */
 
-    const POINTS_COUNT = Math.min(4000, pos.count);
+    const POINTS_COUNT = Math.min(5000, pos.count);
     for (let i = 0; i < POINTS_COUNT; i++) {
       temp.fromBufferAttribute(pos, i);
       temp.applyMatrix4(child.matrixWorld);
@@ -73,7 +81,7 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
     // Create Random Points Across Model
     const sampler = new MeshSurfaceSampler(child).setWeightAttribute("color").build();
 
-    for (let i = 0; i < 2000; i++) {
+    for (let i = 0; i < 1000; i++) {
       sampler.sample(temp);
       temp.applyMatrix4(child.matrixWorld);
       positions.push(temp.x, temp.y, temp.z);
@@ -87,7 +95,6 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
       scales[i] = Math.random();
     }
   });
-  console.log(scales);
 
   /* 
     Geometry
@@ -104,14 +111,13 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
   */
   particles.material = new THREE.ShaderMaterial({
     depthWrite: false,
-    alpha: true,
     blending: THREE.AdditiveBlending,
     vertexShader: particleVertexShader,
     fragmentShader: particleFragShader,
     uniforms: {
       uSize: { value: 10.0 * renderer.getPixelRatio() },
       uTime: { value: 0 },
-      uNoisePeriod: { value: 10 },
+      uNoisePeriod: { value: 1 },
       uNoiseSpeed: { value: 1.0 },
       uNoiseStrength: { value: 0.06 },
     },
@@ -125,8 +131,8 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
   folder
     .add(particles.material.uniforms.uNoisePeriod, "value")
     .min(0)
-    .max(100)
-    .step(0.1)
+    .max(5)
+    .step(0.01)
     .name("Period");
 
   folder
@@ -142,22 +148,6 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
     .max(10)
     .step(0.001)
     .name("Strength");
-});
-
-
-// Update viewport
-window.addEventListener("resize", () => {
-  // Update Sizes
-  sizes.width = window.innerWidth;
-  sizes.height = window.innerHeight;
-
-  // Update Camera
-  camera.aspect = sizes.width / sizes.height;
-  camera.updateProjectionMatrix();
-
-  // Update Renderer
-  renderer.setSize(sizes.width, sizes.height);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 });
 
 // Camera
@@ -177,6 +167,45 @@ const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
 directionalLight.position.set(1, -3, -2);
 scene.add(directionalLight);
 
+/* 
+* Post Processing
+*/
+const effectComposer = new EffectComposer(renderer);
+effectComposer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+effectComposer.setSize(sizes.width, sizes.height);
+
+const renderPass = new RenderPass(scene, camera);
+effectComposer.addPass(renderPass);
+
+const unrealBloomPass = new UnrealBloomPass();
+unrealBloomPass.strength = 0.4
+unrealBloomPass.radius = 0.01
+unrealBloomPass.threshold = 0.2
+effectComposer.addPass(unrealBloomPass);
+
+// Gamma Correction – FINAL PASS 
+const gammaCorrectionPass = new ShaderPass(GammaCorrectionShader);
+effectComposer.addPass(gammaCorrectionPass);
+
+// Update viewport
+window.addEventListener("resize", () => {
+  // Update Sizes
+  sizes.width = window.innerWidth;
+  sizes.height = window.innerHeight;
+
+  // Update Camera
+  camera.aspect = sizes.width / sizes.height;
+  camera.updateProjectionMatrix();
+
+  // Update Renderer
+  renderer.setSize(sizes.width, sizes.height);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  // Update Effect Composer
+  effectComposer.setSize(sizes.width, sizes.height);
+  effectComposer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+});
+
 // Timer
 const timer = new THREE.Timer();
 
@@ -195,8 +224,11 @@ const tick = () => {
     particles.material.uniforms.uTime.value = elapsedTime;
   }
 
+  // Update Passes
+
   // Render
-  renderer.render(scene, camera);
+  // renderer.render(scene, camera);
+  effectComposer.render();
 
   window.requestAnimationFrame(tick);
 };

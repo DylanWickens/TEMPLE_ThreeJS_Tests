@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
+import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
@@ -13,9 +13,15 @@ import GUI from "lil-gui";
 import particleVertexShader from "./shaders/particles/vert.glsl";
 import particleFragShader from "./shaders/particles/frag.glsl";
 
+const SOURCES = {
+  ply: "/PointCloud Bite The Buffalo/2.ply",
+  gltf: "/OP_1/OP_1_Model.gltf",
+};
+
 // Debug
 const gui = new GUI();
 const debugObject = {
+  usePLY: true,
   noiseAmp: 10,
   noiseSpeed: 1.0,
   noiseStrength: 0.06,
@@ -30,7 +36,7 @@ const scene = new THREE.Scene();
 /* 
   Particles 
 */
-let particles = {};
+let particles = null;
 
 // Sizes
 const sizes = {
@@ -51,66 +57,108 @@ renderer.toneMappingExposure = 1.0;
  * Models
  */
 const gltfLoader = new GLTFLoader();
-let scales = null;
+const plyLoader = new PLYLoader();
+let gltfReferenceMaxDim = null;
 
-gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
+function extractPositionsFromPLY(geometry) {
+  const pos = geometry.attributes.position;
+  return new Float32Array(pos.array);
+}
+
+function extractPositionsFromGLTF(gltf) {
   const root = gltf.scene.children[0];
   root.scale.set(0.095, 0.095, 0.095);
   root.updateMatrixWorld(true);
 
-  particles = {};
   const positions = [];
+  const temp = new THREE.Vector3();
 
-  // Traverse to access file meshes
   gltf.scene.traverse((child) => {
     if (!child.isMesh) return;
 
-    // Get Accurate Points form Subdivision
     const pos = child.geometry.attributes.position;
-    const temp = new THREE.Vector3();
-
-    /* If you know the total point count ahead of time,
-    you can pre-allocate totalPoints for opimisation */
-
-    const POINTS_COUNT = Math.min(5000, pos.count);
-    for (let i = 0; i < POINTS_COUNT; i++) {
+    for (let i = 0; i < pos.count; i++) {
       temp.fromBufferAttribute(pos, i);
       temp.applyMatrix4(child.matrixWorld);
       positions.push(temp.x, temp.y, temp.z);
     }
-
-    // Create Random Points Across Model
-    const sampler = new MeshSurfaceSampler(child).setWeightAttribute("color").build();
-
-    for (let i = 0; i < 1000; i++) {
-      sampler.sample(temp);
-      temp.applyMatrix4(child.matrixWorld);
-      positions.push(temp.x, temp.y, temp.z);
-    }
-
-    // Random Scale Value for each Point
-    const totalPoints = positions.length / 3;
-    scales = new Float32Array(totalPoints);
-    // Fill array with 0-1 values
-    for (let i = 0; i < totalPoints; i++) {
-      scales[i] = Math.random();
-    }
   });
 
-  /* 
-    Geometry
-  */
-  particles.geometry = new THREE.BufferGeometry();
-  particles.geometry.setAttribute(
-    "position",
-    new THREE.Float32BufferAttribute(positions, 3),
-  );
-  particles.geometry.setAttribute("aScale", new THREE.BufferAttribute(scales, 1));
+  return new Float32Array(positions);
+}
 
-  /* 
-     Material
-  */
-  particles.material = new THREE.ShaderMaterial({
+function getCenteredMaxDim(positions) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeBoundingBox();
+  geo.center();
+
+  const size = new THREE.Vector3();
+  geo.boundingBox.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const centered = new Float32Array(geo.attributes.position.array);
+
+  geo.dispose();
+  return { centered, maxDim };
+}
+
+function scaleCenteredPositions(centered, scale) {
+  const scaled = new Float32Array(centered.length);
+  for (let i = 0; i < centered.length; i++) {
+    scaled[i] = centered[i] * scale;
+  }
+  return scaled;
+}
+
+async function ensureGltfReference() {
+  if (gltfReferenceMaxDim !== null) return;
+  const positions = await loadGLTFPositions(SOURCES.gltf);
+  const { maxDim } = getCenteredMaxDim(positions);
+  gltfReferenceMaxDim = maxDim;
+}
+
+function preparePositions(positions, usePLY) {
+  const { centered, maxDim } = getCenteredMaxDim(positions);
+  if (!usePLY) return centered;
+
+  const scale = gltfReferenceMaxDim / maxDim;
+  return scaleCenteredPositions(centered, scale);
+}
+
+function loadPLYPositions(path) {
+  return new Promise((resolve, reject) => {
+    plyLoader.load(
+      path,
+      (geometry) => resolve(extractPositionsFromPLY(geometry)),
+      undefined,
+      reject,
+    );
+  });
+}
+
+function loadGLTFPositions(path) {
+  return new Promise((resolve, reject) => {
+    gltfLoader.load(
+      path,
+      (gltf) => resolve(extractPositionsFromGLTF(gltf)),
+      undefined,
+      reject,
+    );
+  });
+}
+
+function buildParticles(positions) {
+  const totalPoints = positions.length / 3;
+  const scales = new Float32Array(totalPoints);
+  for (let i = 0; i < totalPoints; i++) {
+    scales[i] = Math.random();
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("aScale", new THREE.BufferAttribute(scales, 1));
+
+  const material = new THREE.ShaderMaterial({
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     vertexShader: particleVertexShader,
@@ -124,10 +172,32 @@ gltfLoader.load("/OP_1/OP_1_Model.gltf", (gltf) => {
     },
   });
 
-  particles = new THREE.Points(particles.geometry, particles.material);
-  scene.add(particles);
+  return new THREE.Points(geometry, material);
+}
 
+function disposeParticles() {
+  if (!particles) return;
+  scene.remove(particles);
+  particles.geometry.dispose();
+  particles.material.dispose();
+  particles = null;
+}
+
+async function loadPointCloud(usePLY) {
+  disposeParticles();
+  await ensureGltfReference();
+  const positions = usePLY
+    ? await loadPLYPositions(SOURCES.ply)
+    : await loadGLTFPositions(SOURCES.gltf);
+  particles = buildParticles(preparePositions(positions, usePLY));
+  scene.add(particles);
+}
+
+gui.add(debugObject, "usePLY").name("Use PLY").onChange(() => {
+  loadPointCloud(debugObject.usePLY);
 });
+
+loadPointCloud(debugObject.usePLY);
 
 // Camera
 const camera = new THREE.PerspectiveCamera(45, sizes.width / sizes.height, 0.001, 1000);
@@ -164,7 +234,7 @@ const unrealBloomPass = new UnrealBloomPass(
 );
 effectComposer.addPass(unrealBloomPass);
 
-const filmPass = new FilmPass(0.5, false); // low intensity
+const filmPass = new FilmPass(0.9, false); // low intensity
 effectComposer.addPass(filmPass); // before OutputPass
 
 const outputPass = new OutputPass();
@@ -203,7 +273,7 @@ const tick = () => {
   controls.update();
 
   // Update Shaders
-  if(particles.material) {
+  if (particles?.material) {
     particles.material.uniforms.uTime.value = elapsedTime;
   }
 

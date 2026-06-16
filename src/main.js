@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
+import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
@@ -13,8 +14,12 @@ import GUI from "lil-gui";
 import particleVertexShader from "./shaders/particles/vert.glsl";
 import particleFragShader from "./shaders/particles/frag.glsl";
 
+const PLY_FOLDER = "/PointCloud Bite The Buffalo";
+const PLY_FILES = ["1.ply", "2.ply", "3.ply", "4.ply", "5.ply"].map(
+  (name) => `${PLY_FOLDER}/${name}`,
+);
+
 const SOURCES = {
-  ply: "/PointCloud Bite The Buffalo/2.ply",
   gltf: "/OP_1/OP_1_Model.gltf",
 };
 
@@ -22,9 +27,18 @@ const SOURCES = {
 const gui = new GUI();
 const debugObject = {
   usePLY: true,
-  noiseAmp: 10,
-  noiseSpeed: 1.0,
-  noiseStrength: 0.06,
+  plyIndex: 0,
+  useSurfaceSampler: false,
+  surfaceSampleCount: 1000,
+  noiseAmp: 10.5,
+  noiseSpeed: 0.8,
+  noiseStrength: 0.015,
+  bloomStrength: 1.43,
+  bloomRadius: 0.08,
+  bloomThreshold: 0.05,
+  filmIntensity: 1,
+  filmGrayscale: false,
+  exposure: 0.9,
 };
 
 // Canvas tag
@@ -60,12 +74,61 @@ const gltfLoader = new GLTFLoader();
 const plyLoader = new PLYLoader();
 let gltfReferenceMaxDim = null;
 
-function extractPositionsFromPLY(geometry) {
+function extractPositionsFromPLY(geometry, { includeSurfaceSamples = false, sampleCount = 0 } = {}) {
   const pos = geometry.attributes.position;
-  return new Float32Array(pos.array);
+  let positions = new Float32Array(pos.array);
+
+  if (includeSurfaceSamples && sampleCount > 0) {
+    positions = appendPointCloudSamples(positions, sampleCount);
+  }
+
+  return positions;
 }
 
-function extractPositionsFromGLTF(gltf) {
+function appendPointCloudSamples(positions, sampleCount) {
+  const pointCount = positions.length / 3;
+  const combined = new Float32Array(positions.length + sampleCount * 3);
+  combined.set(positions);
+
+  for (let i = 0; i < sampleCount; i++) {
+    const srcIdx = Math.floor(Math.random() * pointCount) * 3;
+    const dstIdx = positions.length + i * 3;
+    combined[dstIdx] = positions[srcIdx];
+    combined[dstIdx + 1] = positions[srcIdx + 1];
+    combined[dstIdx + 2] = positions[srcIdx + 2];
+  }
+
+  return combined;
+}
+
+function appendGLTFSurfaceSamples(gltf, positions, sampleCount) {
+  const meshes = [];
+  gltf.scene.traverse((child) => {
+    if (child.isMesh) meshes.push(child);
+  });
+  if (meshes.length === 0) return;
+
+  const temp = new THREE.Vector3();
+  let remaining = sampleCount;
+
+  for (const mesh of meshes) {
+    const sampler = new MeshSurfaceSampler(mesh);
+    if (mesh.geometry.attributes.color) sampler.setWeightAttribute("color");
+    sampler.build();
+
+    const meshSamples = Math.min(remaining, Math.ceil(sampleCount / meshes.length));
+    for (let i = 0; i < meshSamples; i++) {
+      sampler.sample(temp);
+      temp.applyMatrix4(mesh.matrixWorld);
+      positions.push(temp.x, temp.y, temp.z);
+    }
+
+    remaining -= meshSamples;
+    if (remaining <= 0) break;
+  }
+}
+
+function extractPositionsFromGLTF(gltf, { includeSurfaceSamples = false, sampleCount = 0 } = {}) {
   const root = gltf.scene.children[0];
   root.scale.set(0.095, 0.095, 0.095);
   root.updateMatrixWorld(true);
@@ -83,6 +146,10 @@ function extractPositionsFromGLTF(gltf) {
       positions.push(temp.x, temp.y, temp.z);
     }
   });
+
+  if (includeSurfaceSamples && sampleCount > 0) {
+    appendGLTFSurfaceSamples(gltf, positions, sampleCount);
+  }
 
   return new Float32Array(positions);
 }
@@ -110,14 +177,46 @@ function scaleCenteredPositions(centered, scale) {
   return scaled;
 }
 
+function rotatePositions(positions, axis, angle) {
+  const rotated = new Float32Array(positions.length);
+  const point = new THREE.Vector3();
+  const matrix = new THREE.Matrix4();
+
+  if (axis === "x") matrix.makeRotationX(angle);
+  else if (axis === "y") matrix.makeRotationY(angle);
+  else matrix.makeRotationZ(angle);
+
+  for (let i = 0; i < positions.length; i += 3) {
+    point.set(positions[i], positions[i + 1], positions[i + 2]);
+    point.applyMatrix4(matrix);
+    rotated[i] = point.x;
+    rotated[i + 1] = point.y;
+    rotated[i + 2] = point.z;
+  }
+
+  return rotated;
+}
+
 async function ensureGltfReference() {
   if (gltfReferenceMaxDim !== null) return;
-  const positions = await loadGLTFPositions(SOURCES.gltf);
+  const positions = await loadGLTFPositions(SOURCES.gltf, { includeSurfaceSamples: false });
   const { maxDim } = getCenteredMaxDim(positions);
   gltfReferenceMaxDim = maxDim;
 }
 
+function getSamplerOptions() {
+  return {
+    includeSurfaceSamples: debugObject.useSurfaceSampler,
+    sampleCount: debugObject.surfaceSampleCount,
+  };
+}
+
 function preparePositions(positions, usePLY) {
+  if (usePLY) {
+    // Polycam PLY is Z-up; rotate to Three.js Y-up for a side view
+    positions = rotatePositions(positions, "x", -Math.PI / 2);
+  }
+
   const { centered, maxDim } = getCenteredMaxDim(positions);
   if (!usePLY) return centered;
 
@@ -125,26 +224,33 @@ function preparePositions(positions, usePLY) {
   return scaleCenteredPositions(centered, scale);
 }
 
-function loadPLYPositions(path) {
+function loadPLYPositions(path, options = getSamplerOptions()) {
   return new Promise((resolve, reject) => {
     plyLoader.load(
       path,
-      (geometry) => resolve(extractPositionsFromPLY(geometry)),
+      (geometry) => resolve(extractPositionsFromPLY(geometry, options)),
       undefined,
       reject,
     );
   });
 }
 
-function loadGLTFPositions(path) {
+function loadGLTFPositions(path, options = getSamplerOptions()) {
   return new Promise((resolve, reject) => {
     gltfLoader.load(
       path,
-      (gltf) => resolve(extractPositionsFromGLTF(gltf)),
+      (gltf) => resolve(extractPositionsFromGLTF(gltf, options)),
       undefined,
       reject,
     );
   });
+}
+
+function updateNoiseUniforms() {
+  if (!particles?.material) return;
+  particles.material.uniforms.uNoisePeriod.value = debugObject.noiseAmp;
+  particles.material.uniforms.uNoiseSpeed.value = debugObject.noiseSpeed;
+  particles.material.uniforms.uNoiseStrength.value = debugObject.noiseStrength;
 }
 
 function buildParticles(positions) {
@@ -166,9 +272,9 @@ function buildParticles(positions) {
     uniforms: {
       uSize: { value: 10.0 * renderer.getPixelRatio() },
       uTime: { value: 0 },
-      uNoisePeriod: { value: 1 },
-      uNoiseSpeed: { value: 1.0 },
-      uNoiseStrength: { value: 0.06 },
+      uNoisePeriod: { value: debugObject.noiseAmp },
+      uNoiseSpeed: { value: debugObject.noiseSpeed },
+      uNoiseStrength: { value: debugObject.noiseStrength },
     },
   });
 
@@ -187,17 +293,56 @@ async function loadPointCloud(usePLY) {
   disposeParticles();
   await ensureGltfReference();
   const positions = usePLY
-    ? await loadPLYPositions(SOURCES.ply)
+    ? await loadPLYPositions(PLY_FILES[debugObject.plyIndex])
     : await loadGLTFPositions(SOURCES.gltf);
   particles = buildParticles(preparePositions(positions, usePLY));
   scene.add(particles);
 }
 
-gui.add(debugObject, "usePLY").name("Use PLY").onChange(() => {
+function reloadPointCloud() {
   loadPointCloud(debugObject.usePLY);
-});
+}
 
-loadPointCloud(debugObject.usePLY);
+const plyController = gui
+  .add(debugObject, "plyIndex", 0, PLY_FILES.length - 1, 1)
+  .name("PLY: 1.ply")
+  .onChange(() => {
+    plyController.name(`PLY: ${PLY_FILES[debugObject.plyIndex].split("/").pop()}`);
+    if (debugObject.usePLY) reloadPointCloud();
+  });
+
+gui.add(debugObject, "usePLY").name("Use PLY").onChange(reloadPointCloud);
+
+const sampleCountController = gui
+  .add(debugObject, "surfaceSampleCount", 0, 20000, 100)
+  .name("Sample count")
+  .onFinishChange(reloadPointCloud);
+
+gui
+  .add(debugObject, "useSurfaceSampler")
+  .name("Surface sampler")
+  .onChange((enabled) => {
+    sampleCountController.enable(enabled);
+    reloadPointCloud();
+  });
+
+sampleCountController.enable(debugObject.useSurfaceSampler);
+
+const noiseFolder = gui.addFolder("Noise");
+noiseFolder
+  .add(debugObject, "noiseStrength", 0, 0.15, 0.001)
+  .name("Strength")
+  .onChange(updateNoiseUniforms);
+noiseFolder
+  .add(debugObject, "noiseSpeed", 0, 2, 0.01)
+  .name("Speed")
+  .onChange(updateNoiseUniforms);
+noiseFolder
+  .add(debugObject, "noiseAmp", 0.5, 15, 0.1)
+  .name("Frequency")
+  .onChange(updateNoiseUniforms);
+
+reloadPointCloud();
 
 // Camera
 const camera = new THREE.PerspectiveCamera(45, sizes.width / sizes.height, 0.001, 1000);
@@ -228,17 +373,52 @@ effectComposer.addPass(renderPass);
 
 const unrealBloomPass = new UnrealBloomPass(
   new THREE.Vector2(sizes.width, sizes.height),
-  0.5, // strength
-  0.8, // radius
-  0.2, // threshold
+  debugObject.bloomStrength,
+  debugObject.bloomRadius,
+  debugObject.bloomThreshold,
 );
 effectComposer.addPass(unrealBloomPass);
 
-const filmPass = new FilmPass(0.9, false); // low intensity
-effectComposer.addPass(filmPass); // before OutputPass
+const filmPass = new FilmPass(debugObject.filmIntensity, debugObject.filmGrayscale);
+effectComposer.addPass(filmPass);
 
 const outputPass = new OutputPass();
 effectComposer.addPass(outputPass);
+
+function updatePostProcessing() {
+  unrealBloomPass.strength = debugObject.bloomStrength;
+  unrealBloomPass.radius = debugObject.bloomRadius;
+  unrealBloomPass.threshold = debugObject.bloomThreshold;
+  filmPass.uniforms.intensity.value = debugObject.filmIntensity;
+  filmPass.uniforms.grayscale.value = debugObject.filmGrayscale;
+  renderer.toneMappingExposure = debugObject.exposure;
+}
+
+const postFolder = gui.addFolder("Post Processing");
+postFolder
+  .add(debugObject, "bloomStrength", 0, 2, 0.01)
+  .name("Bloom strength")
+  .onChange(updatePostProcessing);
+postFolder
+  .add(debugObject, "bloomRadius", 0, 1, 0.01)
+  .name("Bloom radius")
+  .onChange(updatePostProcessing);
+postFolder
+  .add(debugObject, "bloomThreshold", 0, 1, 0.01)
+  .name("Bloom threshold")
+  .onChange(updatePostProcessing);
+postFolder
+  .add(debugObject, "filmIntensity", 0, 1, 0.01)
+  .name("Film grain")
+  .onChange(updatePostProcessing);
+postFolder
+  .add(debugObject, "filmGrayscale")
+  .name("Film grayscale")
+  .onChange(updatePostProcessing);
+postFolder
+  .add(debugObject, "exposure", 0, 3, 0.01)
+  .name("Exposure")
+  .onChange(updatePostProcessing);
 
 // Update viewport
 window.addEventListener("resize", () => {
@@ -257,6 +437,7 @@ window.addEventListener("resize", () => {
   // Update Effect Composer
   effectComposer.setSize(sizes.width, sizes.height);
   effectComposer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  unrealBloomPass.resolution.set(sizes.width, sizes.height);
 });
 
 // Timer
